@@ -791,15 +791,9 @@ def run():
     # Store parsed args for reload functionality
     PARSED_ARGS = parsed_args
 
-    # Extract git context from environment (set by git-webdiff.sh)
-    git_args_str = os.environ.get('WEBDIFF_GIT_ARGS', '').strip()
-    if git_args_str:
-        # Parse the shell-quoted string back into a list
-        import shlex
-        # Filter out empty strings that can occur when bash array was empty
-        GIT_ARGS = [arg for arg in shlex.split(git_args_str) if arg]
-
-    GIT_CWD = os.environ.get('WEBDIFF_CWD', None)
+    # Extract git context from parsed arguments
+    GIT_ARGS = parsed_args.get('git_args', [])
+    GIT_CWD = parsed_args.get('git_repo', os.getcwd())
 
     # Check if watch mode is enabled
     watch_interval = parsed_args.get('watch', 0)
@@ -817,33 +811,22 @@ def run():
     elif watch_interval > 0:
         logging.warning("Watch mode requested but no git context available (GIT_CWD missing)")
 
-    # Determine how to load the DIFF
-    if 'dirs' in parsed_args:
-        # Direct directory comparison (not using git difftool)
-        DIFF = dirdiff.gitdiff(*parsed_args['dirs'], WEBDIFF_CONFIG)
-    elif 'files' in parsed_args:
-        # Direct file comparison
-        a_file, b_file = parsed_args['files']
-        DIFF = [argparser._shim_for_file_diff(a_file, b_file)]
-    else:
-        # Git difftool mode - start difftool process and get temp dirs
-        if GIT_CWD:
-            # We have git context - start difftool process
-            result = start_git_difftool(GIT_ARGS, GIT_CWD)
-            if result is None:
-                # No differences found - start with empty diff
-                # User can change git args from UI to see different diffs
-                logging.info("No differences found with initial git args, starting with empty diff")
-                DIFF = []
-                DIFFTOOL_PROC = None
-            else:
-                DIFFTOOL_PROC, left_dir, right_dir = result
-                DIFF = dirdiff.gitdiff(left_dir, right_dir, WEBDIFF_CONFIG)
-        elif len(sys.argv) == 3:
-            # Legacy mode - direct file paths from git difftool wrapper call
-            DIFF = [argparser._shim_for_file_diff(sys.argv[1], sys.argv[2])]
-        else:
+    # Git-only mode: start difftool process and get temp dirs
+    if GIT_CWD:
+        # We have git context - start difftool process
+        result = start_git_difftool(GIT_ARGS, GIT_CWD)
+        if result is None:
+            # No differences found - start with empty diff
+            # User can change git args from UI to see different diffs
+            logging.info("No differences found with initial git args, starting with empty diff")
             DIFF = []
+            DIFFTOOL_PROC = None
+        else:
+            DIFFTOOL_PROC, left_dir, right_dir = result
+            DIFF = dirdiff.gitdiff(left_dir, right_dir, WEBDIFF_CONFIG)
+    else:
+        # No git context provided
+        DIFF = []
 
     # Get root_path from config
     root_path = WEBDIFF_CONFIG.get('rootPath', '')

@@ -10,10 +10,15 @@ class UsageError(Exception):
     pass
 
 
-USAGE = """Usage: webdiff <left_dir> <right_dir>
-       webdiff <left_file> <right_file>
+USAGE = """Usage: git-webdiff [options] [git_args ...]
 
-Or run "git webdiff" from a git repository.
+Web-based git difftool for viewing diffs in your browser.
+
+Examples:
+  git-webdiff                    # Compare working directory with HEAD
+  git-webdiff HEAD~3..HEAD       # Compare specific commits
+  git-webdiff --cached           # Compare staged changes
+  git-webdiff --theme monokai    # Use custom theme
 """
 
 
@@ -84,11 +89,16 @@ def parse(args):
         '--color-char-delete', type=str, help='Background color for deleted characters.', default='#fcc'
     )
 
+    # Git integration options
     parser.add_argument(
-        'dirs',
+        '--git-repo', type=str, help='Path to git repository. Defaults to current directory.', default=None
+    )
+
+    parser.add_argument(
+        'git_args',
         type=str,
         nargs='*',
-        help='Directories or files to diff.',
+        help='Git arguments to pass to git diff (e.g., HEAD~3..HEAD, --cached, -- file.txt).',
     )
     args = parser.parse_args(args=args)
 
@@ -128,34 +138,9 @@ def parse(args):
         'host': args.host,
         'timeout': timeout_minutes,
         'watch': watch_interval,
+        'git_repo': args.git_repo if args.git_repo else os.getcwd(),
+        'git_args': args.git_args,  # All positional args are git arguments
     }
-
-    if len(args.dirs) > 2:
-        raise UsageError('You must specify two files/dirs (got %d)' % len(args.dirs))
-
-    if len(args.dirs) == 2:
-        a, b = args.dirs
-        if os.environ.get('WEBDIFF_DIR_A') and os.environ.get('WEBDIFF_DIR_B'):
-            # This happens when you run "git webdiff" and we have to make a copy of
-            # the temp directories before we detach and git difftool cleans them up.
-            a = os.environ.get('WEBDIFF_DIR_A')
-            b = os.environ.get('WEBDIFF_DIR_B')
-
-        for x in (a, b):
-            if not os.path.exists(x):
-                raise UsageError('"%s" does not exist' % x)
-
-        a_dir = os.path.isdir(a)
-        b_dir = os.path.isdir(b)
-        if a_dir and not b_dir:
-            raise UsageError('"%s" is a directory but "%s" is not' % (a, b))
-        if not a_dir and b_dir:
-            raise UsageError('"%s" is a directory but "%s" is not' % (b, a))
-
-        if a_dir and b_dir:
-            out['dirs'] = (a, b)
-        else:
-            out['files'] = (a, b)
 
     return out
 
