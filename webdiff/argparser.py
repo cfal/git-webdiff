@@ -3,8 +3,6 @@
 import argparse
 import os
 
-from webdiff.localfilediff import LocalFileDiff
-
 
 class UsageError(Exception):
     pass
@@ -143,15 +141,3 @@ def parse(args):
     }
 
     return out
-
-
-# TODO: move into dirdiff?
-def _shim_for_file_diff(a_file, b_file):
-    """Returns a LocalFileDiff object for a one-file diff."""
-    return LocalFileDiff(
-        a_root=os.path.dirname(a_file),
-        a_path=a_file,
-        b_root=os.path.dirname(b_file),
-        b_path=b_file,
-        is_move=False,  # probably not a move
-    )
