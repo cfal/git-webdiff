@@ -575,9 +575,30 @@ def refresh_diff(new_git_args=None):
         result = start_git_difftool(git_args, GIT_CWD)
 
         if result is None:
+            # No differences found - update to empty diff
+            logging.info("No differences found with new git args")
+
+            # Update globals
+            with DIFFTOOL_LOCK:
+                DIFFTOOL_PROC = None
+
+            with DIFF_LOCK:
+                DIFF = []
+
+            # Update GIT_ARGS if new ones were provided
+            if new_git_args is not None:
+                GIT_ARGS = new_git_args
+
+            # Update checksum and reset baseline
+            new_checksum = compute_diff_checksum()
+            with CHECKSUM_LOCK:
+                CURRENT_CHECKSUM = new_checksum
+                INITIAL_CHECKSUM = new_checksum
+
             with RELOAD_LOCK:
                 RELOAD_IN_PROGRESS = False
-            return False, "Failed to start git difftool"
+
+            return True, "Reloaded (0 files - no differences)"
 
         new_proc, left_dir, right_dir = result
 
@@ -810,11 +831,14 @@ def run():
             # We have git context - start difftool process
             result = start_git_difftool(GIT_ARGS, GIT_CWD)
             if result is None:
-                sys.stderr.write("Error: Failed to start git difftool\n")
-                sys.exit(1)
-
-            DIFFTOOL_PROC, left_dir, right_dir = result
-            DIFF = dirdiff.gitdiff(left_dir, right_dir, WEBDIFF_CONFIG)
+                # No differences found - start with empty diff
+                # User can change git args from UI to see different diffs
+                logging.info("No differences found with initial git args, starting with empty diff")
+                DIFF = []
+                DIFFTOOL_PROC = None
+            else:
+                DIFFTOOL_PROC, left_dir, right_dir = result
+                DIFF = dirdiff.gitdiff(left_dir, right_dir, WEBDIFF_CONFIG)
         elif len(sys.argv) == 3:
             # Legacy mode - direct file paths from git difftool wrapper call
             DIFF = [argparser._shim_for_file_diff(sys.argv[1], sys.argv[2])]

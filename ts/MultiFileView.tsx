@@ -144,6 +144,29 @@ export function MultiFileView(props: MultiFileViewProps) {
     setExpandedFiles(new Set());
   };
 
+  // Show a nice message when there are no diffs
+  if (filePairs.length === 0) {
+    return (
+      <div className="multi-file-view">
+        <div className="files-summary">
+          <div style={{
+            padding: '40px 20px',
+            textAlign: 'center',
+            fontFamily: 'Arial, sans-serif',
+            color: '#24292e'
+          }}>
+            <p style={{ margin: '0 0 8px 0', fontSize: '18px', fontWeight: 'bold' }}>
+              No differences found
+            </p>
+            <p style={{ margin: 0, fontSize: '14px' }}>
+              Try changing the git arguments above to compare different commits or branches
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="multi-file-view">
       <div className="files-summary">
@@ -205,7 +228,7 @@ export function MultiFileView(props: MultiFileViewProps) {
           </button>
         </div>
       </div>
-      {filePairs.map((filePair, idx) => 
+      {filePairs.map((filePair, idx) =>
         hiddenFiles.has(idx) ? null : (
           <FileView
             key={idx}

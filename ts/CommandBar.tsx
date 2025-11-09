@@ -49,6 +49,11 @@ export function CommandBar({
             type="text"
             value={gitArgs}
             onChange={(e) => setGitArgs(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (argsChanged || diffChanged) && !reloadInProgress) {
+                handleReload();
+              }
+            }}
             placeholder="[arguments] (eg. HEAD~3..HEAD)"
             disabled={reloadInProgress}
             style={{

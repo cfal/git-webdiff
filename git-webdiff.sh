@@ -137,9 +137,10 @@ else
 fi
 
 if [ $has_diff -eq 0 ]; then
-    # No differences found
-    echo "No differences found."
-    exit 1
+    # No differences found with initial args, but we still start the server
+    # because the user can change git args from the UI
+    echo "No differences found with initial arguments."
+    echo "Starting server anyway - you can change git arguments from the UI."
 fi
 
 # Start the webdiff server directly
