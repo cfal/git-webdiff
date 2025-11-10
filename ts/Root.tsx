@@ -10,14 +10,25 @@ import { Options, encodeOptions, ServerConfig, parseOptions, UpdateOptionsFn } f
 import { MultiFileView } from './MultiFileView';
 import { apiUrl } from './api-utils';
 import { CommandBar } from './CommandBar';
+import { RepoSelector } from './RepoSelector';
+import { RepoManagementModal } from './RepoManagementModal';
 
+interface Repo {
+  label: string;
+  path: string;
+}
+
+declare const repos: Repo[];
 declare const pairs: FilePair[];
+declare const current_repo_label: string;
+declare const current_repo_idx: number;
 declare const SERVER_CONFIG: ServerConfig;
 declare const git_args: string[];
 declare const watch_enabled: boolean;
+declare const manage_repos_enabled: boolean;
 
-// Hook for checking for diff updates
-function useReloadDetection(pollInterval: number = 5000) {
+// Hook for checking for diff updates (per-repo)
+function useReloadDetection(repoIdx: number, pollInterval: number = 5000) {
   const [reloadAvailable, setReloadAvailable] = React.useState(false);
   const [watchEnabled, setWatchEnabled] = React.useState(false);
   const [reloadInProgress, setReloadInProgress] = React.useState(false);
@@ -26,7 +37,7 @@ function useReloadDetection(pollInterval: number = 5000) {
     // Check for updates periodically
     const checkForUpdates = async () => {
       try {
-        const response = await fetch(apiUrl('/api/diff-changed'));
+        const response = await fetch(apiUrl(`/api/diff-changed/${repoIdx}`));
         if (response.ok) {
           const data = await response.json();
           setWatchEnabled(data.watch_enabled);
@@ -48,7 +59,7 @@ function useReloadDetection(pollInterval: number = 5000) {
     const interval = setInterval(checkForUpdates, pollInterval);
 
     return () => clearInterval(interval);
-  }, [pollInterval]);
+  }, [repoIdx, pollInterval]);
 
   const reload = React.useCallback(async (newGitArgs?: string[]) => {
     try {
@@ -56,7 +67,7 @@ function useReloadDetection(pollInterval: number = 5000) {
       setReloadAvailable(false);
 
       // This blocks until the backend completes the refresh
-      const response = await fetch(apiUrl('/api/server-reload'), {
+      const response = await fetch(apiUrl(`/api/server-reload/${repoIdx}`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -83,7 +94,7 @@ function useReloadDetection(pollInterval: number = 5000) {
       console.error('Error reloading:', error);
       alert('Failed to reload diff data');
     }
-  }, []);
+  }, [repoIdx]);
 
   return { reloadAvailable, watchEnabled, reload, reloadInProgress };
 }
@@ -94,16 +105,28 @@ export function Root() {
   const [imageDiffMode, setImageDiffMode] = React.useState<ImageDiffMode>('side-by-side');
   const [showKeyboardHelp, setShowKeyboardHelp] = React.useState(false);
   const [showOptions, setShowOptions] = React.useState(false);
+  const [showManageRepos, setShowManageRepos] = React.useState(false);
 
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Hot reload detection
-  const { reloadAvailable, reload, reloadInProgress } = useReloadDetection();
+  // Current repo data (from server)
+  const currentRepoLabel = current_repo_label;
+  const currentRepoIdx = current_repo_idx;
+
+  // Repo switching
+  const switchRepo = React.useCallback((label: string) => {
+    // Update URL with new repo label
+    window.location.href = `/?repo=${encodeURIComponent(label)}`;
+  }, []);
+
+  // Hot reload detection (per-repo)
+  const { reloadAvailable, reload, reloadInProgress } = useReloadDetection(currentRepoIdx);
 
   // Set document title
   React.useEffect(() => {
-    document.title = `Diff: ${pairs.length} file${pairs.length !== 1 ? 's' : ''}`;
-  }, []);
+    const repoInfo = repos.length > 1 ? ` [${currentRepoLabel}]` : '';
+    document.title = `Diff: ${pairs.length} file${pairs.length !== 1 ? 's' : ''}${repoInfo}`;
+  }, [currentRepoLabel]);
 
   const options = React.useMemo(() => parseOptions(searchParams), [searchParams]);
   // TODO: merge defaults into options
@@ -151,19 +174,41 @@ export function Root() {
     width: ${1 + maxDiffWidth}ch;
   }`;
 
+  const repoSelectorElement = (
+    <RepoSelector
+      repos={repos}
+      currentLabel={currentRepoLabel}
+      manageReposEnabled={manage_repos_enabled}
+      onSwitch={switchRepo}
+      onManageRepos={() => setShowManageRepos(true)}
+    />
+  );
+
   return (
     <>
       <style>{inlineStyle}</style>
-      <div style={{ padding: '16px', maxWidth: '1400px', margin: '0 auto' }}>
-        {/* Command bar for git args and reload */}
-        {watch_enabled && (
+      <div style={{ padding: '8px', maxWidth: '1400px', margin: '0 auto' }}>
+        {/* Command bar for git args and reload (includes repo selector) */}
+        {watch_enabled ? (
           <CommandBar
             initialGitArgs={git_args}
             watchEnabled={watch_enabled}
             diffChanged={reloadAvailable}
             onReload={reload}
             reloadInProgress={reloadInProgress}
+            repoSelector={repoSelectorElement}
           />
+        ) : (
+          /* Show repo selector even when watch is disabled */
+          <div style={{
+            background: '#fafbfc',
+            border: '1px solid #d1d5da',
+            borderRadius: '6px',
+            padding: '8px',
+            marginBottom: '8px',
+          }}>
+            {repoSelectorElement}
+          </div>
         )}
 
         <div
@@ -259,6 +304,7 @@ export function Root() {
           />
         ) : null}
         <MultiFileView
+          repoIdx={currentRepoIdx}
           filePairs={pairs}
           imageDiffMode={imageDiffMode}
           pdiffMode={pdiffMode}
@@ -269,6 +315,13 @@ export function Root() {
           normalizeJSON={normalizeJSON}
         />
       </div>
+      {showManageRepos && manage_repos_enabled && (
+        <RepoManagementModal
+          initialRepos={repos}
+          currentRepoLabel={currentRepoLabel}
+          onClose={() => setShowManageRepos(false)}
+        />
+      )}
     </>
   );
 }

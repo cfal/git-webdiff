@@ -6,6 +6,7 @@ import {filePairDisplayName} from './utils';
 import {GitDiffOptions} from './diff-options';
 
 interface FileViewProps {
+  repoIdx: number;
   filePair: FilePair;
   isExpanded: boolean;
   onToggle: () => void;
@@ -88,6 +89,7 @@ function FileView({
 }
 
 export interface MultiFileViewProps {
+  repoIdx: number;
   filePairs: FilePair[];
   imageDiffMode: ImageDiffMode;
   pdiffMode: PerceptualDiffMode;
@@ -99,7 +101,7 @@ export interface MultiFileViewProps {
 }
 
 export function MultiFileView(props: MultiFileViewProps) {
-  const {filePairs, ...diffProps} = props;
+  const {repoIdx, filePairs, ...diffProps} = props;
   const [expandedFiles, setExpandedFiles] = React.useState<Set<number>>(
     new Set(filePairs.map((_, idx) => idx))
   );
@@ -232,6 +234,7 @@ export function MultiFileView(props: MultiFileViewProps) {
         hiddenFiles.has(idx) ? null : (
           <FileView
             key={idx}
+            repoIdx={repoIdx}
             filePair={filePair}
             isExpanded={expandedFiles.has(idx)}
             onToggle={() => toggleFile(idx)}

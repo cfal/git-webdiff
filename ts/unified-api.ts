@@ -18,12 +18,14 @@ export interface UnifiedFileData {
  * Fetches all data needed to render a file diff in a single request.
  * This includes thick diff metadata, file contents for both sides, and diff operations.
  *
+ * @param repoIdx Repository index
  * @param idx File pair index
  * @param options Diff options flags
  * @param normalizeJson Whether to normalize JSON before diffing
  * @param noTruncate If true, fetch full content even if lines are very long
  */
 export async function getUnifiedFileData(
+  repoIdx: number,
   idx: number,
   options: string[],
   normalizeJson: boolean,
@@ -38,7 +40,7 @@ export async function getUnifiedFileData(
     params.set('no_truncate', '1');
   }
 
-  const response = await fetch(apiUrl(`/file/${idx}?${params}`));
+  const response = await fetch(apiUrl(`/file/${repoIdx}/${idx}?${params}`));
   if (!response.ok) {
     throw new Error(`Failed to fetch file data: ${response.statusText}`);
   }
@@ -64,20 +66,21 @@ const unifiedCache: Map<string, UnifiedFileData> = new Map();
 
 /**
  * Get unified file data with caching.
- * Cache key includes index, options, and normalizeJson flag.
+ * Cache key includes repo index, file index, options, and normalizeJson flag.
  */
 export async function getCachedUnifiedFileData(
+  repoIdx: number,
   idx: number,
   options: string[],
   normalizeJson: boolean
 ): Promise<UnifiedFileData> {
-  const cacheKey = `${idx}-${options.join(',')}-${normalizeJson}`;
-  
+  const cacheKey = `${repoIdx}-${idx}-${options.join(',')}-${normalizeJson}`;
+
   if (unifiedCache.has(cacheKey)) {
     return unifiedCache.get(cacheKey)!;
   }
-  
-  const data = await getUnifiedFileData(idx, options, normalizeJson);
+
+  const data = await getUnifiedFileData(repoIdx, idx, options, normalizeJson);
   unifiedCache.set(cacheKey, data);
   return data;
 }

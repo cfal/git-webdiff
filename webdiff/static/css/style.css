@@ -231,7 +231,7 @@ kbd {
 
 /* Multi-file view styles */
 .multi-file-view {
-  margin-top: 10px;
+  margin-top: 5px;
 }
 
 /* .multi-file-controls - Removed: merged into summary-controls */
@@ -243,7 +243,7 @@ kbd {
 }
 
 .file-diff-container {
-  margin-bottom: 16px;
+  margin-bottom: 8px;
   border: 1px solid #d1d5da;
   border-radius: 6px;
   overflow: hidden;
@@ -310,7 +310,7 @@ kbd {
   border: 1px solid #d1d5da;
   border-radius: 6px;
   padding: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
 }
 
 .file-count-header {

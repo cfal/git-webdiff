@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
+import atexit
 import dataclasses
 import hashlib
 import json
 import logging
 import mimetypes
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -38,31 +40,74 @@ def determine_path():
 
 
 SERVER_CONFIG = {}
-DIFF = None
 PORT = None
 HOSTNAME = 'localhost'
 DEBUG = os.environ.get('DEBUG')
 WEBDIFF_DIR = determine_path()
 
-# Hot reload support (no-restart approach with difftool management)
-GIT_ARGS = []  # Original git arguments for git difftool
-GIT_CWD = None  # Working directory for git commands
-WATCH_ENABLED = False  # Whether watch mode is enabled
-INITIAL_CHECKSUM = None  # Checksum when server started
-CURRENT_CHECKSUM = None  # Current diff checksum (updated by watch thread)
-CHECKSUM_LOCK = threading.Lock()  # Lock for checksum updates
-
-# Difftool process management
-DIFFTOOL_PROC = None  # The git difftool process
-DIFFTOOL_LOCK = threading.Lock()  # Lock for difftool operations
-DIFF_LOCK = threading.Lock()  # Lock for DIFF updates
-RELOAD_IN_PROGRESS = False  # Flag to prevent concurrent reloads
-RELOAD_LOCK = threading.Lock()  # Lock for reload state
+# Multi-repo support
+REPOS = []  # List of {label, path} dicts
+REPO_STATES = []  # List of state dicts (indexed by repo_idx)
+                  # Each state: {
+                  #   git_args: [],
+                  #   difftool_proc: Process,
+                  #   diff: [],
+                  #   initial_checksum: str,
+                  #   current_checksum: str,
+                  #   difftool_lock: Lock,
+                  #   diff_lock: Lock,
+                  #   checksum_lock: Lock,
+                  #   reload_in_progress: bool,
+                  #   reload_lock: Lock
+                  # }
+GIT_ARGS = []  # Global default git args (used for all repos initially)
+WATCH_ENABLED = False  # Global watch setting
+MANAGE_REPOS_ENABLED = False  # Enable repo management from UI
 
 # Timeout support
 START_TIME = None  # Server start time
 TIMEOUT_MINUTES = 0  # Timeout in minutes (0 = no timeout)
 PARSED_ARGS = None  # Stored parsed arguments for reload
+
+
+def get_repo_idx_by_label(label: str) -> Optional[int]:
+    """Get repo index by label.
+
+    Args:
+        label: Repo label to search for
+
+    Returns:
+        Index of repo, or None if not found
+    """
+    for idx, repo in enumerate(REPOS):
+        if repo['label'] == label:
+            return idx
+    return None
+
+
+def init_repo_state(repo: dict, git_args: list) -> dict:
+    """Initialize state for a single repo.
+
+    Args:
+        repo: Repo dict with 'label' and 'path' keys
+        git_args: Initial git arguments
+
+    Returns:
+        State dict for this repo
+    """
+    return {
+        'git_args': git_args.copy(),
+        'difftool_proc': None,
+        'diff': [],
+        'initial_checksum': None,
+        'current_checksum': None,
+        'difftool_lock': threading.Lock(),
+        'diff_lock': threading.Lock(),
+        'checksum_lock': threading.Lock(),
+        'reload_in_progress': False,
+        'reload_lock': threading.Lock(),
+    }
+
 
 class ClientDisconnectMiddleware(BaseHTTPMiddleware):
     """Middleware to handle client disconnects gracefully."""
@@ -169,21 +214,39 @@ def create_app(root_path: str = "") -> FastAPI:
 
 
     @app.get("/")
-    @app.get("/{idx}")
-    async def handle_index(request: Request, idx: Optional[int] = None):
-        global DIFF
+    async def handle_index(request: Request):
+        """Main page - uses repo label in query string for cacheability."""
         try:
+            # Get repo label from query string, default to first repo
+            repo_label = request.query_params.get('repo', REPOS[0]['label'] if REPOS else None)
+
+            if not repo_label:
+                return JSONResponse({'error': 'No repositories configured'}, status_code=500)
+
+            # Find repo index by label
+            repo_idx = get_repo_idx_by_label(repo_label)
+
+            if repo_idx is None:
+                # Invalid label, redirect to first repo
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(url=f"/?repo={REPOS[0]['label']}")
+
+            repo = REPOS[repo_idx]
+            state = REPO_STATES[repo_idx]
+
+            # Get diff data for this repo
+            with state['diff_lock']:
+                pairs = diff.get_thin_list(state['diff'])
+
+            # Find template
             index_path = os.path.join(WEBDIFF_DIR, 'templates/file_diff.html')
 
-            # Debug logging
             if DEBUG:
                 logging.info(f"WEBDIFF_DIR: {WEBDIFF_DIR}")
                 logging.info(f"Looking for template at: {index_path}")
                 logging.info(f"Template exists: {os.path.exists(index_path)}")
 
-            # Try alternate paths if the primary one doesn't exist
             if not os.path.exists(index_path):
-                # Try to find the template relative to the package
                 import webdiff
                 webdiff_package_dir = os.path.dirname(webdiff.__file__)
                 index_path = os.path.join(webdiff_package_dir, 'templates/file_diff.html')
@@ -195,21 +258,22 @@ def create_app(root_path: str = "") -> FastAPI:
             with open(index_path) as f:
                 html = f.read()
 
-                # Inject the root path into the data
+                # Inject data for multi-repo
                 data = {
-                    'idx': idx if idx is not None else 0,
+                    'repos': REPOS,  # List of {label, path}
+                    'current_repo_label': repo_label,
+                    'current_repo_idx': repo_idx,  # For API calls
+                    'pairs': pairs,
+                    'git_args': state['git_args'],
                     'has_magick': util.is_imagemagick_available(),
-                    'pairs': diff.get_thin_list(DIFF),
                     'server_config': SERVER_CONFIG,
                     'root_path': app.root_path,
-                    'git_args': GIT_ARGS,  # For the command bar UI
-                    'watch_enabled': WATCH_ENABLED,  # Whether hot reload is enabled
+                    'watch_enabled': WATCH_ENABLED,
+                    'manage_repos_enabled': MANAGE_REPOS_ENABLED,
                 }
 
-                html = html.replace(
-                    '{{data}}',
-                    json.dumps(data, indent=2)
-                )
+                html = html.replace('{{data}}', json.dumps(data, indent=2))
+
             return HTMLResponse(content=html)
         except Exception as e:
             logging.error(f"Error handling index: {e}")
@@ -238,24 +302,32 @@ def create_app(root_path: str = "") -> FastAPI:
 
         return lines_affected > 0, lines_affected, bytes_over
 
-    @app.get("/file/{idx}")
+    @app.get("/file/{repo_idx}/{idx}")
     async def get_file_complete(
+        repo_idx: int,
         idx: int,
         normalize_json: bool = False,
         options: Optional[str] = None,  # Comma-separated diff options
         no_truncate: int = 0  # Set to 1 to disable truncation
     ):
         """Get all data needed to render a file diff in one request."""
-        global DIFF, SERVER_CONFIG
+        global SERVER_CONFIG
+
+        # Validate repo index
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        state = REPO_STATES[repo_idx]
 
         # Maximum line length before we warn about truncation
         MAX_LINE_LENGTH = 500
 
-        # Validate index
-        if idx < 0 or idx >= len(DIFF):
-            return JSONResponse({'error': f'Invalid index {idx}'}, status_code=400)
-
-        file_pair = DIFF[idx]
+        # Validate file index
+        with state['diff_lock']:
+            diff_list = state['diff']
+            if idx < 0 or idx >= len(diff_list):
+                return JSONResponse({'error': f'Invalid file index {idx}'}, status_code=400)
+            file_pair = diff_list[idx]
 
         # Get thick data (metadata)
         thick_data = diff.get_thick_dict(file_pair)
@@ -354,26 +426,41 @@ def create_app(root_path: str = "") -> FastAPI:
 
         return JSONResponse(response)
 
-    @app.get("/{side}/image/{path:path}")
-    async def handle_get_image(side: str, path: str):
-        global DIFF
+    @app.get("/{side}/image/{repo_idx}/{path:path}")
+    async def handle_get_image(side: str, repo_idx: int, path: str):
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
         mime_type, _ = mimetypes.guess_type(path)
         if not mime_type or not mime_type.startswith('image/'):
             return JSONResponse({'error': 'wrong type'}, status_code=400)
 
-        idx = diff.find_diff_index(DIFF, side, path)
+        state = REPO_STATES[repo_idx]
+
+        with state['diff_lock']:
+            diff_list = state['diff']
+            idx = diff.find_diff_index(diff_list, side, path)
+
         if idx is None:
             return JSONResponse({'error': 'not found'}, status_code=400)
 
-        d = DIFF[idx]
+        d = diff_list[idx]
         abs_path = d.a_path if side == 'a' else d.b_path
         return FileResponse(abs_path, media_type=mime_type)
 
 
-    @app.get("/pdiff/{idx}")
-    async def handle_pdiff(idx: int):
-        global DIFF
-        d = DIFF[idx]
+    @app.get("/pdiff/{repo_idx}/{idx}")
+    async def handle_pdiff(repo_idx: int, idx: int):
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        state = REPO_STATES[repo_idx]
+
+        with state['diff_lock']:
+            if idx < 0 or idx >= len(state['diff']):
+                return JSONResponse({'error': f'Invalid file index: {idx}'}, status_code=400)
+            d = state['diff'][idx]
+
         try:
             _, pdiff_image = util.generate_pdiff_image(d.a_path, d.b_path)
             dilated_image_path = util.generate_dilated_pdiff_image(pdiff_image)
@@ -384,10 +471,18 @@ def create_app(root_path: str = "") -> FastAPI:
             return Response(content=f'ImageMagick error {e}', status_code=501)
 
 
-    @app.get("/pdiffbbox/{idx}")
-    async def handle_pdiff_bbox(idx: int):
-        global DIFF
-        d = DIFF[idx]
+    @app.get("/pdiffbbox/{repo_idx}/{idx}")
+    async def handle_pdiff_bbox(repo_idx: int, idx: int):
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        state = REPO_STATES[repo_idx]
+
+        with state['diff_lock']:
+            if idx < 0 or idx >= len(state['diff']):
+                return JSONResponse({'error': f'Invalid file index: {idx}'}, status_code=400)
+            d = state['diff'][idx]
+
         try:
             _, pdiff_image = util.generate_pdiff_image(d.a_path, d.b_path)
             bbox = util.get_pdiff_bbox(pdiff_image)
@@ -397,10 +492,11 @@ def create_app(root_path: str = "") -> FastAPI:
         except util.ImageMagickError as e:
             return JSONResponse(f'ImageMagick error {e}', status_code=501)
 
-    @app.get("/api/diff-changed")
-    async def diff_changed():
-        """Check if diff has changed."""
-        global WATCH_ENABLED, INITIAL_CHECKSUM, CURRENT_CHECKSUM
+    @app.get("/api/diff-changed/{repo_idx}")
+    async def diff_changed(repo_idx: int):
+        """Check if diff has changed for a specific repo."""
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
 
         if not WATCH_ENABLED:
             return JSONResponse(
@@ -415,13 +511,15 @@ def create_app(root_path: str = "") -> FastAPI:
                 }
             )
 
-        # Check if checksum has changed
-        with CHECKSUM_LOCK:
-            changed = (INITIAL_CHECKSUM is not None and
-                      CURRENT_CHECKSUM is not None and
-                      CURRENT_CHECKSUM != INITIAL_CHECKSUM)
+        state = REPO_STATES[repo_idx]
+
+        # Check if checksum has changed for this repo
+        with state['checksum_lock']:
+            changed = (state['initial_checksum'] is not None and
+                      state['current_checksum'] is not None and
+                      state['current_checksum'] != state['initial_checksum'])
             if DEBUG and changed:
-                logging.debug(f"Checksums differ: initial={INITIAL_CHECKSUM[:8] if INITIAL_CHECKSUM else None}, current={CURRENT_CHECKSUM[:8] if CURRENT_CHECKSUM else None}")
+                logging.debug(f"Repo {repo_idx} checksums differ: initial={state['initial_checksum'][:8] if state['initial_checksum'] else None}, current={state['current_checksum'][:8] if state['current_checksum'] else None}")
 
         return JSONResponse(
             {
@@ -435,15 +533,18 @@ def create_app(root_path: str = "") -> FastAPI:
             }
         )
 
-    @app.post("/api/server-reload")
-    async def server_reload(request: Request):
-        """Trigger diff refresh synchronously.
+    @app.post("/api/server-reload/{repo_idx}")
+    async def server_reload(repo_idx: int, request: Request):
+        """Reload a specific repo.
 
         Optional JSON body: {"git_args": ["HEAD~3..HEAD"]} to change diff scope.
 
         This endpoint blocks until the refresh is complete, then returns success.
         The frontend will reload the page after getting the response.
         """
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
         try:
             # Parse optional git_args from request body
             new_git_args = None
@@ -454,8 +555,8 @@ def create_app(root_path: str = "") -> FastAPI:
             except:
                 pass  # No body or invalid JSON, use current args
 
-            # Call refresh_diff synchronously (it returns success, message)
-            success, message = refresh_diff(new_git_args)
+            # Call refresh_repo_diff synchronously (it returns success, message)
+            success, message = refresh_repo_diff(repo_idx, new_git_args)
 
             if success:
                 return JSONResponse({
@@ -469,7 +570,75 @@ def create_app(root_path: str = "") -> FastAPI:
                 }, status_code=500)
 
         except Exception as e:
-            logging.error(f"Error in server_reload: {e}")
+            logging.error(f"Error in server_reload for repo {repo_idx}: {e}")
+            return JSONResponse({
+                'success': False,
+                'error': str(e)
+            }, status_code=500)
+
+    @app.post("/api/repos/validate")
+    async def validate_repo_endpoint(request: Request):
+        """Validate a single repository."""
+        if not MANAGE_REPOS_ENABLED:
+            return JSONResponse({
+                'valid': False,
+                'error': 'Repository management not enabled (use --manage-repos flag)'
+            }, status_code=403)
+
+        try:
+            data = await request.json()
+            label = data.get('label', '')
+            path = data.get('path', '')
+
+            # Validate the single repo
+            valid, error = argparser.validate_single_repo(label, path)
+
+            if valid:
+                return JSONResponse({
+                    'valid': True,
+                    'label': label,
+                    'path': os.path.abspath(path)
+                })
+            else:
+                return JSONResponse({
+                    'valid': False,
+                    'error': error
+                })
+        except Exception as e:
+            logging.error(f"Error in validate_repo: {e}")
+            return JSONResponse({
+                'valid': False,
+                'error': str(e)
+            }, status_code=500)
+
+    @app.post("/api/repos/update")
+    async def update_repos_endpoint(request: Request):
+        """Replace entire repository list."""
+        if not MANAGE_REPOS_ENABLED:
+            return JSONResponse({
+                'success': False,
+                'error': 'Repository management not enabled (use --manage-repos flag)'
+            }, status_code=403)
+
+        try:
+            data = await request.json()
+            new_repos = data.get('repos', [])
+
+            # Call update_repos function
+            success, error = update_repos(new_repos)
+
+            if success:
+                return JSONResponse({
+                    'success': True,
+                    'repos': REPOS
+                })
+            else:
+                return JSONResponse({
+                    'success': False,
+                    'error': error
+                }, status_code=400)
+        except Exception as e:
+            logging.error(f"Error in update_repos: {e}")
             return JSONResponse({
                 'success': False,
                 'error': str(e)
@@ -484,6 +653,42 @@ def start_git_difftool(git_args, git_cwd):
     Returns None if difftool fails to start or can't read directories.
     """
     import shlex
+
+    # First, check if there are any differences using git diff --quiet
+    # Exit codes: 0 = no differences, 1 = has differences, 2+ = error
+    check_cmd = ['git', 'diff', '--quiet'] + git_args
+    logging.debug(f"Checking for differences: {' '.join(check_cmd)}")
+
+    try:
+        check_result = subprocess.run(
+            check_cmd,
+            cwd=git_cwd,
+            capture_output=True,
+            timeout=30
+        )
+
+        if check_result.returncode == 0:
+            # No differences found
+            logging.info(f"No differences found in {git_cwd} (git diff --quiet returned 0)")
+            return None
+        elif check_result.returncode > 1:
+            # Error occurred
+            stderr_str = check_result.stderr.decode() if isinstance(check_result.stderr, bytes) else check_result.stderr
+            logging.error(f"git diff --quiet failed with exit code {check_result.returncode}")
+            logging.error(f"  Command: {' '.join(check_cmd)}")
+            logging.error(f"  Working directory: {git_cwd}")
+            if stderr_str:
+                logging.error(f"  stderr: {stderr_str}")
+            return None
+        # If returncode == 1, there are differences, continue with difftool
+        logging.debug(f"Differences found, proceeding with difftool")
+
+    except subprocess.TimeoutExpired:
+        logging.error(f"git diff --quiet timed out in {git_cwd}")
+        return None
+    except Exception as e:
+        logging.error(f"Error running git diff --quiet: {e}")
+        return None
 
     # Get path to difftool wrapper script
     wrapper_path = os.path.join(WEBDIFF_DIR, 'difftool-wrapper.sh')
@@ -512,7 +717,16 @@ def start_git_difftool(git_args, git_cwd):
         right_dir = proc.stdout.readline().strip()
 
         if not left_dir or not right_dir:
-            logging.error("Failed to read temp directories from difftool wrapper")
+            # This should not happen since we pre-checked for diffs
+            # If it does, it's a real error
+            stderr_output = proc.stderr.read() if proc.stderr else ""
+            logging.error(f"Failed to read temp directories from difftool wrapper (unexpected - pre-check passed)")
+            logging.error(f"  left_dir: '{left_dir}'")
+            logging.error(f"  right_dir: '{right_dir}'")
+            logging.error(f"  git difftool command: {' '.join(cmd)}")
+            logging.error(f"  working directory: {git_cwd}")
+            if stderr_output:
+                logging.error(f"  stderr: {stderr_output}")
             proc.kill()
             return None
 
@@ -531,125 +745,127 @@ def start_git_difftool(git_args, git_cwd):
         return None
 
 
-def refresh_diff(new_git_args=None):
-    """Refresh the DIFF by restarting git difftool.
+def refresh_repo_diff(repo_idx: int, new_git_args=None):
+    """Refresh diff for a specific repo.
 
     Runs synchronously when user requests reload.
 
     Args:
+        repo_idx: Index of repo to refresh
         new_git_args: Optional new git arguments (for changing diff scope)
 
     Returns:
         (success, message) tuple
     """
-    global DIFFTOOL_PROC, DIFF, GIT_ARGS, RELOAD_IN_PROGRESS, CURRENT_CHECKSUM, INITIAL_CHECKSUM
+    if repo_idx < 0 or repo_idx >= len(REPOS):
+        return False, f"Invalid repo index: {repo_idx}"
 
-    print(f"refresh_diff() called, new_git_args={new_git_args}")
+    state = REPO_STATES[repo_idx]
+    repo = REPOS[repo_idx]
+    repo_path = repo['path']
 
-    with RELOAD_LOCK:
-        if RELOAD_IN_PROGRESS:
-            print("Reload already in progress, returning")
+    logging.info(f"refresh_repo_diff() called for repo {repo_idx} ({repo['label']}), new_git_args={new_git_args}")
+
+    with state['reload_lock']:
+        if state['reload_in_progress']:
+            logging.info(f"Reload already in progress for repo {repo_idx}, returning")
             return False, "Reload already in progress"
-        RELOAD_IN_PROGRESS = True
+        state['reload_in_progress'] = True
 
     try:
         # Use new args if provided, otherwise use current args
-        git_args = new_git_args if new_git_args is not None else GIT_ARGS
+        git_args = new_git_args if new_git_args is not None else state['git_args']
 
-        logging.info(f"Refreshing diff with args: {git_args}")
+        logging.info(f"Refreshing repo {repo_idx} ({repo['label']}) with args: {git_args}")
 
         # Kill old difftool process if it exists
-        with DIFFTOOL_LOCK:
-            if DIFFTOOL_PROC:
+        with state['difftool_lock']:
+            if state['difftool_proc']:
                 try:
-                    DIFFTOOL_PROC.terminate()
-                    DIFFTOOL_PROC.wait(timeout=5)
+                    state['difftool_proc'].terminate()
+                    state['difftool_proc'].wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    DIFFTOOL_PROC.kill()
-                    DIFFTOOL_PROC.wait()
+                    state['difftool_proc'].kill()
+                    state['difftool_proc'].wait()
                 except Exception as e:
-                    logging.warning(f"Error killing old difftool: {e}")
+                    logging.warning(f"Error killing old difftool for repo {repo_idx}: {e}")
 
         # Start new difftool process
-        result = start_git_difftool(git_args, GIT_CWD)
+        result = start_git_difftool(git_args, repo_path)
 
         if result is None:
-            # No differences found - update to empty diff
-            logging.info("No differences found with new git args")
+            # No differences found
+            logging.info(f"No differences found for repo {repo_idx} with new git args")
 
-            # Update globals
-            with DIFFTOOL_LOCK:
-                DIFFTOOL_PROC = None
+            with state['difftool_lock']:
+                state['difftool_proc'] = None
 
-            with DIFF_LOCK:
-                DIFF = []
+            with state['diff_lock']:
+                state['diff'] = []
 
-            # Update GIT_ARGS if new ones were provided
+            # Update git_args if new ones were provided
             if new_git_args is not None:
-                GIT_ARGS = new_git_args
+                state['git_args'] = new_git_args
 
             # Update checksum and reset baseline
-            new_checksum = compute_diff_checksum()
-            with CHECKSUM_LOCK:
-                CURRENT_CHECKSUM = new_checksum
-                INITIAL_CHECKSUM = new_checksum
+            new_checksum = compute_diff_checksum_for_repo(repo_path, git_args)
+            with state['checksum_lock']:
+                state['current_checksum'] = new_checksum
+                state['initial_checksum'] = new_checksum
 
-            with RELOAD_LOCK:
-                RELOAD_IN_PROGRESS = False
+            with state['reload_lock']:
+                state['reload_in_progress'] = False
 
             return True, "Reloaded (0 files - no differences)"
 
         new_proc, left_dir, right_dir = result
 
-        # Update global DIFF using dirdiff.gitdiff
+        # Compute new diff
         try:
             new_diff = dirdiff.gitdiff(left_dir, right_dir, SERVER_CONFIG['webdiff'])
 
-            # Atomically update globals
-            with DIFFTOOL_LOCK:
-                DIFFTOOL_PROC = new_proc
+            # Atomically update state
+            with state['difftool_lock']:
+                state['difftool_proc'] = new_proc
 
-            with DIFF_LOCK:
-                DIFF = new_diff
+            with state['diff_lock']:
+                state['diff'] = new_diff
 
-            # Update GIT_ARGS if new ones were provided
+            # Update git_args if new ones were provided
             if new_git_args is not None:
-                GIT_ARGS = new_git_args
+                state['git_args'] = new_git_args
 
             # Update checksum and reset baseline
-            new_checksum = compute_diff_checksum()
-            print(f"Reload complete, resetting checksum to: {new_checksum[:8] if new_checksum else None}")
-            logging.info(f"Reload complete, resetting checksum to: {new_checksum[:8] if new_checksum else None}")
-            with CHECKSUM_LOCK:
-                old_initial = INITIAL_CHECKSUM
-                CURRENT_CHECKSUM = new_checksum
-                INITIAL_CHECKSUM = new_checksum  # Reset baseline to new checksum
-                print(f"Checksum reset: INITIAL {old_initial[:8] if old_initial else None} -> {INITIAL_CHECKSUM[:8] if INITIAL_CHECKSUM else None}")
+            new_checksum = compute_diff_checksum_for_repo(repo_path, git_args)
+            logging.info(f"Reload complete for repo {repo_idx}, resetting checksum to: {new_checksum[:8] if new_checksum else None}")
+            with state['checksum_lock']:
+                state['current_checksum'] = new_checksum
+                state['initial_checksum'] = new_checksum  # Reset baseline to new checksum
 
             # Clear reload flag
-            with RELOAD_LOCK:
-                RELOAD_IN_PROGRESS = False
+            with state['reload_lock']:
+                state['reload_in_progress'] = False
 
-            logging.info(f"Diff refreshed successfully ({len(new_diff)} files)")
+            logging.info(f"Repo {repo_idx} refreshed successfully ({len(new_diff)} files)")
             return True, f"Reloaded {len(new_diff)} files"
 
         except Exception as e:
-            logging.error(f"Failed to compute new diff: {e}")
+            logging.error(f"Failed to compute new diff for repo {repo_idx}: {e}")
             # Kill the new process since we failed
             try:
                 new_proc.kill()
             except:
                 pass
 
-            with RELOAD_LOCK:
-                RELOAD_IN_PROGRESS = False
+            with state['reload_lock']:
+                state['reload_in_progress'] = False
 
             return False, f"Failed to compute diff: {str(e)}"
 
     except Exception as e:
-        logging.error(f"Error in refresh_diff: {e}")
-        with RELOAD_LOCK:
-            RELOAD_IN_PROGRESS = False
+        logging.error(f"Error in refresh_repo_diff for repo {repo_idx}: {e}")
+        with state['reload_lock']:
+            state['reload_in_progress'] = False
         return False, str(e)
 
 
@@ -672,6 +888,34 @@ def timeout_thread():
             os._exit(0)  # Force exit the entire process
 
 
+def cleanup_difftool_processes():
+    """Clean up all difftool processes on shutdown."""
+    logging.info("Cleaning up difftool processes...")
+    for idx, state in enumerate(REPO_STATES):
+        try:
+            with state['difftool_lock']:
+                if state['difftool_proc']:
+                    try:
+                        logging.info(f"Terminating difftool process for repo {idx}")
+                        state['difftool_proc'].terminate()
+                        state['difftool_proc'].wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logging.warning(f"Difftool process for repo {idx} didn't terminate, killing it")
+                        state['difftool_proc'].kill()
+                        state['difftool_proc'].wait()
+                    except Exception as e:
+                        logging.warning(f"Error terminating difftool for repo {idx}: {e}")
+        except Exception as e:
+            logging.warning(f"Error accessing difftool_lock for repo {idx}: {e}")
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals by cleaning up and exiting."""
+    logging.info(f"Received signal {signum}, shutting down...")
+    cleanup_difftool_processes()
+    sys.exit(0)
+
+
 def random_port():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(('', 0))
@@ -686,33 +930,31 @@ def find_port(webdiff_config):
     return random_port()
 
 
-def compute_diff_checksum():
-    """Compute checksum of the current git diff output.
+def compute_diff_checksum_for_repo(repo_path: str, git_args: list):
+    """Compute checksum of a specific repo's git diff output.
 
-    Returns None if we don't have git context (can't reload).
+    Args:
+        repo_path: Path to the git repository
+        git_args: Git arguments to pass to git diff
+
+    Returns:
+        SHA256 checksum hex string, or None on error
     """
-    global GIT_ARGS, GIT_CWD
-
-    if not GIT_CWD:
-        return None
-
     try:
-        # Re-run the original git diff command
-        # If GIT_ARGS is empty, just run 'git diff' (compares working tree to HEAD)
+        # Re-run the git diff command for this repo
         cmd = ['git', 'diff']
-        if GIT_ARGS:
-            cmd += GIT_ARGS
+        if git_args:
+            cmd += git_args
         result = subprocess.run(
             cmd,
-            cwd=GIT_CWD,
+            cwd=repo_path,
             capture_output=True,
             timeout=30  # Prevent hanging
         )
 
         if result.returncode not in (0, 1):  # 0 = no diff, 1 = has diff
-            logging.warning(f"git diff command failed with code {result.returncode}")
+            logging.warning(f"git diff command failed for {repo_path} with code {result.returncode}")
             logging.warning(f"Command was: {' '.join(cmd)}")
-            logging.warning(f"Working directory: {GIT_CWD}")
             if result.stderr:
                 stderr_str = result.stderr.decode() if isinstance(result.stderr, bytes) else result.stderr
                 logging.warning(f"git diff stderr: {stderr_str}")
@@ -722,55 +964,140 @@ def compute_diff_checksum():
         checksum = hashlib.sha256(result.stdout).hexdigest()
         return checksum
     except subprocess.TimeoutExpired:
-        logging.error("git diff command timed out")
+        logging.error(f"git diff command timed out for {repo_path}")
         return None
     except Exception as e:
-        logging.error(f"Error computing diff checksum: {e}")
+        logging.error(f"Error computing diff checksum for {repo_path}: {e}")
         return None
 
 
 def check_for_changes_thread(poll_interval=5):
-    """Background thread that polls for diff changes and updates CURRENT_CHECKSUM.
+    """Background thread that polls for diff changes in all repos.
 
-    Does NOT trigger restarts - just updates the checksum.
+    Does NOT trigger restarts - just updates the checksums.
     The /api/server-reload endpoint triggers the actual restart.
 
     Args:
         poll_interval: How often to check (in seconds)
     """
-    global CURRENT_CHECKSUM, WATCH_ENABLED
-
-    print(f"Watch thread started (polling every {poll_interval}s)")
-    logging.info(f"Watch thread started (polling every {poll_interval}s)")
+    logging.info(f"Watch thread started for {len(REPOS)} repos (polling every {poll_interval}s)")
 
     while WATCH_ENABLED:
+        for repo_idx, repo in enumerate(REPOS):
+            state = REPO_STATES[repo_idx]
+
+            try:
+                new_checksum = compute_diff_checksum_for_repo(repo['path'], state['git_args'])
+
+                if new_checksum is None:
+                    # Can't compute checksum, skip this repo
+                    continue
+
+                with state['checksum_lock']:
+                    if new_checksum != state['current_checksum']:
+                        logging.info(f"Diff change detected in repo {repo_idx} ({repo['label']}) - old: {state['current_checksum'][:8] if state['current_checksum'] else None}, new: {new_checksum[:8]}")
+                    # Always update to latest checksum
+                    state['current_checksum'] = new_checksum
+
+            except Exception as e:
+                logging.error(f"Error checking repo {repo_idx} ({repo['label']}): {e}")
+
+        time.sleep(poll_interval)
+
+
+def start_repo(repo_idx: int, repo_path: str, git_args: list, watch_enabled: bool):
+    """Start difftool for a repo and populate its state.
+
+    Args:
+        repo_idx: Index of repo in REPO_STATES
+        repo_path: Path to git repository
+        git_args: Initial git arguments
+        watch_enabled: Whether watch mode is enabled
+    """
+    state = REPO_STATES[repo_idx]
+    repo_label = REPOS[repo_idx]['label']
+
+    result = start_git_difftool(git_args, repo_path)
+
+    if result is None:
+        # No differences
+        logging.info(f"Repo {repo_idx} ({repo_label}): No differences found, starting with empty diff")
+        state['difftool_proc'] = None
+        state['diff'] = []
+    else:
+        proc, left_dir, right_dir = result
+        state['difftool_proc'] = proc
+        state['diff'] = dirdiff.gitdiff(left_dir, right_dir, SERVER_CONFIG['webdiff'])
+        logging.info(f"Repo {repo_idx} ({repo_label}): Loaded {len(state['diff'])} files")
+
+    # Compute checksums for watch mode
+    if watch_enabled:
+        checksum = compute_diff_checksum_for_repo(repo_path, git_args)
+        state['initial_checksum'] = checksum
+        state['current_checksum'] = checksum
+        if checksum:
+            logging.info(f"Repo {repo_idx} ({repo_label}): Initial checksum: {checksum[:8]}")
+
+
+def update_repos(new_repos: list) -> tuple:
+    """Replace all repos with new list atomically.
+
+    Args:
+        new_repos: List of {"label": str, "path": str} dicts
+
+    Returns:
+        (success, error_message)
+    """
+    global REPOS, REPO_STATES
+
+    # Validate all repos first
+    valid, error = argparser.validate_repo_list(new_repos)
+    if not valid:
+        return False, error
+
+    # Save old state for rollback
+    old_repos = REPOS.copy()
+    old_states = REPO_STATES.copy()
+
+    try:
+        # Cleanup old difftool processes
+        logging.info("Cleaning up old difftool processes...")
+        cleanup_difftool_processes()
+
+        # Replace repos
+        REPOS = new_repos.copy()
+        REPO_STATES = []
+
+        # Initialize new repos
+        logging.info(f"Initializing {len(REPOS)} repos...")
+        for idx, repo in enumerate(REPOS):
+            state = init_repo_state(repo, GIT_ARGS)
+            REPO_STATES.append(state)
+            start_repo(idx, repo['path'], GIT_ARGS, WATCH_ENABLED)
+
+        logging.info(f"Successfully updated to {len(REPOS)} repos")
+        return True, None
+
+    except Exception as e:
+        # Rollback on error
+        logging.error(f"Error updating repos, rolling back: {e}")
+
         try:
-            new_checksum = compute_diff_checksum()
+            REPOS = old_repos
+            REPO_STATES = old_states
 
-            if new_checksum is None:
-                # Can't compute checksum, sleep and retry
-                print(f"Watch thread: checksum is None, skipping")
-                time.sleep(poll_interval)
-                continue
+            # Restart old repos
+            for idx, repo in enumerate(REPOS):
+                start_repo(idx, repo['path'], GIT_ARGS, WATCH_ENABLED)
+        except Exception as rollback_error:
+            logging.error(f"CRITICAL: Rollback failed: {rollback_error}")
 
-            with CHECKSUM_LOCK:
-                if new_checksum != CURRENT_CHECKSUM:
-                    print(f"Diff change detected - old: {CURRENT_CHECKSUM[:8] if CURRENT_CHECKSUM else None}, new: {new_checksum[:8] if new_checksum else None}")
-                    logging.info(f"Diff change detected - old: {CURRENT_CHECKSUM[:8] if CURRENT_CHECKSUM else None}, new: {new_checksum[:8] if new_checksum else None}")
-                # Always update to latest checksum
-                CURRENT_CHECKSUM = new_checksum
-
-            time.sleep(poll_interval)
-        except Exception as e:
-            print(f"Error in watch thread: {e}")
-            logging.error(f"Error in watch thread: {e}")
-            time.sleep(poll_interval)
+        return False, f"Failed to update repos: {str(e)}"
 
 
 def run():
-    global DIFF, PORT, HOSTNAME, SERVER_CONFIG, PARSED_ARGS
-    global GIT_ARGS, GIT_CWD, WATCH_ENABLED, INITIAL_CHECKSUM, CURRENT_CHECKSUM
-    global DIFFTOOL_PROC, START_TIME, TIMEOUT_MINUTES
+    global PORT, HOSTNAME, SERVER_CONFIG, PARSED_ARGS
+    global REPOS, REPO_STATES, GIT_ARGS, WATCH_ENABLED, START_TIME, TIMEOUT_MINUTES, MANAGE_REPOS_ENABLED
 
     try:
         parsed_args = argparser.parse(sys.argv[1:])
@@ -790,42 +1117,31 @@ def run():
     # Store parsed args for reload functionality
     PARSED_ARGS = parsed_args
 
-    # Extract git context from parsed arguments
+    # Extract repos and git args
+    REPOS = parsed_args.get('repos', [])
     GIT_ARGS = parsed_args.get('git_args', [])
-    GIT_CWD = parsed_args.get('git_repo', os.getcwd())
+    MANAGE_REPOS_ENABLED = parsed_args.get('manage_repos', False)
 
     # Check if watch mode is enabled
     watch_interval = parsed_args.get('watch', 0)
-    if watch_interval > 0 and GIT_CWD:
-        WATCH_ENABLED = True
-        # Compute initial checksum
-        checksum = compute_diff_checksum()
-        INITIAL_CHECKSUM = checksum
-        CURRENT_CHECKSUM = checksum
-        if CURRENT_CHECKSUM:
-            print(f"Watch mode enabled (interval: {watch_interval}s, initial checksum: {CURRENT_CHECKSUM[:8]})")
-            logging.info(f"Watch mode enabled (interval: {watch_interval}s)")
-        else:
-            logging.warning("Watch mode enabled but could not compute initial checksum")
-    elif watch_interval > 0:
-        logging.warning("Watch mode requested but no git context available (GIT_CWD missing)")
+    WATCH_ENABLED = watch_interval > 0
 
-    # Git-only mode: start difftool process and get temp dirs
-    if GIT_CWD:
-        # We have git context - start difftool process
-        result = start_git_difftool(GIT_ARGS, GIT_CWD)
-        if result is None:
-            # No differences found - start with empty diff
-            # User can change git args from UI to see different diffs
-            logging.info("No differences found with initial git args, starting with empty diff")
-            DIFF = []
-            DIFFTOOL_PROC = None
-        else:
-            DIFFTOOL_PROC, left_dir, right_dir = result
-            DIFF = dirdiff.gitdiff(left_dir, right_dir, WEBDIFF_CONFIG)
-    else:
-        # No git context provided
-        DIFF = []
+    if WATCH_ENABLED:
+        logging.info(f"Watch mode enabled (interval: {watch_interval}s)")
+
+    # Initialize all repos
+    REPO_STATES = []
+    for idx, repo in enumerate(REPOS):
+        state = init_repo_state(repo, GIT_ARGS)
+        REPO_STATES.append(state)
+        start_repo(idx, repo['path'], GIT_ARGS, WATCH_ENABLED)
+
+    logging.info(f"Initialized {len(REPOS)} repo(s)")
+
+    # Register cleanup handlers
+    atexit.register(cleanup_difftool_processes)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     # Get root_path from config
     root_path = WEBDIFF_CONFIG.get('rootPath', '')
@@ -836,9 +1152,9 @@ def run():
     logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s', level=logging.DEBUG)
 
     if root_path:
-        print(f"Starting webdiff server at http://{HOSTNAME}:{PORT}{root_path}")
+        print(f"Starting git-webdiff server at http://{HOSTNAME}:{PORT}{root_path}")
     else:
-        print(f"Starting webdiff server at http://{HOSTNAME}:{PORT}")
+        print(f"Starting git-webdiff server at http://{HOSTNAME}:{PORT}")
 
     # Get timeout value from parsed args and initialize START_TIME
     TIMEOUT_MINUTES = parsed_args.get('timeout', 0)
@@ -872,19 +1188,8 @@ def run():
         watch_thread.start()
         print(f"Watch mode active: checking for changes every {watch_interval} seconds")
 
-    # Run server with graceful shutdown handling
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        # Clean up difftool process if it exists
-        with DIFFTOOL_LOCK:
-            if DIFFTOOL_PROC:
-                try:
-                    DIFFTOOL_PROC.terminate()
-                    DIFFTOOL_PROC.wait(timeout=5)
-                except:
-                    pass
-        sys.exit(0)
+    # Run server (cleanup happens via signal handlers and atexit)
+    server.run()
 
 
 if __name__ == "__main__":

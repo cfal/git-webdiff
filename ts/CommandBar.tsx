@@ -6,6 +6,7 @@ interface CommandBarProps {
   diffChanged: boolean;
   onReload: (newGitArgs?: string[]) => void;
   reloadInProgress: boolean;
+  repoSelector?: React.ReactNode;
 }
 
 export function CommandBar({
@@ -14,6 +15,7 @@ export function CommandBar({
   diffChanged,
   onReload,
   reloadInProgress,
+  repoSelector,
 }: CommandBarProps) {
   const [gitArgs, setGitArgs] = React.useState(initialGitArgs.join(' '));
   const argsChanged = gitArgs !== initialGitArgs.join(' ');
@@ -35,15 +37,16 @@ export function CommandBar({
         background: '#fafbfc',
         border: '1px solid #d1d5da',
         borderRadius: '6px',
-        padding: '16px',
-        marginBottom: '16px',
+        padding: '8px',
+        marginBottom: '8px',
         fontFamily: 'sans-serif',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: '300px' }}>
+          {repoSelector}
           <span style={{ fontWeight: 600, color: '#495057', fontSize: '14px' }}>
-            git diff
+            $ git diff
           </span>
           <input
             type="text"
@@ -114,7 +117,7 @@ export function CommandBar({
       {watchEnabled && diffChanged && !argsChanged && (
         <div
           style={{
-            marginTop: '12px',
+            marginTop: '6px',
             padding: '8px 12px',
             background: '#fff3cd',
             border: '1px solid #ffc107',

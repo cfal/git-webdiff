@@ -13,6 +13,7 @@ import {apiUrl} from './api-utils';
 declare const HAS_IMAGE_MAGICK: boolean;
 
 export interface Props {
+  repoIdx: number;
   filePair: ImageFilePair;
   imageDiffMode: ImageDiffMode;
   pdiffMode: PerceptualDiffMode;
@@ -43,12 +44,13 @@ export function ImageDiff(props: Props) {
     imageDiffMode = 'side-by-side'; // Only one that makes sense for one-sided diffs.
   }
 
+  const {repoIdx} = props;
   const [, forceUpdate] = React.useState(0);
   const computePerceptualDiffBox = (fp: ImageFilePair) => {
     if (!isSameSizeImagePair(fp)) return;
     // TODO(danvk): restructure this, it's a mess
     (async () => {
-      const response = await fetch(apiUrl(`/pdiffbbox/${fp.idx}`));
+      const response = await fetch(apiUrl(`/pdiffbbox/${repoIdx}/${fp.idx}`));
       const bbox = (await response.json()) as DiffBox;
       const {diffData} = fp;
       // XXX are there other fields?

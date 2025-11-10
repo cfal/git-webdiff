@@ -8,6 +8,7 @@ import {ImageDiffMode} from './ImageDiffModeSelector';
 export type PerceptualDiffMode = 'off' | 'bbox' | 'pixels';
 
 export interface Props {
+  repoIdx: number;
   thinFilePair: FilePair;
   imageDiffMode: ImageDiffMode;
   pdiffMode: PerceptualDiffMode;
@@ -19,7 +20,7 @@ export interface Props {
 }
 
 export function DiffView(props: Props) {
-  const {diffOptions, thinFilePair, normalizeJSON} = props;
+  const {repoIdx, diffOptions, thinFilePair, normalizeJSON} = props;
   const [unifiedData, setUnifiedData] = React.useState<UnifiedFileData | null>(null);
   const [noTruncate, setNoTruncate] = React.useState(false);
 
@@ -28,6 +29,7 @@ export function DiffView(props: Props) {
       try {
         // Fetch everything in one request
         const data = await getUnifiedFileData(
+          repoIdx,
           thinFilePair.idx,
           gitDiffOptionsToFlags(diffOptions),
           normalizeJSON,
@@ -38,7 +40,7 @@ export function DiffView(props: Props) {
         console.error('Failed to load file data:', e);
       }
     })();
-  }, [thinFilePair.idx, diffOptions, normalizeJSON, noTruncate]);
+  }, [repoIdx, thinFilePair.idx, diffOptions, normalizeJSON, noTruncate]);
 
   if (!unifiedData) {
     return <div>Loading…</div>;
