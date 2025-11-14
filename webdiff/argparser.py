@@ -192,6 +192,13 @@ def parse(args):
 
     # Color configuration options
     parser.add_argument(
+        '--colourblind', '--colorblind',
+        action='store_true',
+        help='Use colorblind-friendly colors (blue/orange instead of red/green) for deuteranopia accessibility.',
+        default=False,
+        dest='colourblind'
+    )
+    parser.add_argument(
         '--color-insert', type=str, help='Background color for inserted lines.', default='#efe'
     )
     parser.add_argument(
@@ -232,6 +239,19 @@ def parse(args):
         help='Git arguments to pass to git diff (e.g., HEAD~3..HEAD, --cached, -- file.txt).',
     )
     args = parser.parse_args(args=args)
+
+    # Apply colorblind-friendly colors if flag is set (GitHub's colorblind scheme)
+    if args.colourblind:
+        # Only override colors that are still at their default values
+        # This allows manual color overrides to take precedence
+        if args.color_insert == '#efe':
+            args.color_insert = '#ddf4ff'  # Light blue (GitHub: diffBlob-additionLine)
+        if args.color_delete == '#fee':
+            args.color_delete = '#fff1e5'  # Light orange (GitHub: diffBlob-deletionLine)
+        if args.color_char_insert == '#cfc':
+            args.color_char_insert = '#b6e3ff'  # Medium blue (GitHub: diffBlob-additionWord)
+        if args.color_char_delete == '#fcc':
+            args.color_char_delete = '#ffd8b5'  # Medium orange (GitHub: diffBlob-deletionWord)
 
     # Build configuration structure compatible with old git config format
     config = {
