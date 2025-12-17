@@ -1,5 +1,6 @@
 import React from 'react';
 import { RepoEditDialog } from './RepoEditDialog';
+import {apiUrl} from './api-utils';
 
 interface Repo {
   label: string;
@@ -74,7 +75,7 @@ export function RepoManagementModal({
     setError(null);
 
     try {
-      const response = await fetch('/api/repos/update', {
+      const response = await fetch(apiUrl('/api/repos/update'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: localRepos }),
@@ -93,7 +94,7 @@ export function RepoManagementModal({
           window.location.reload();
         } else {
           // Current repo was removed, redirect to first repo
-          window.location.href = `/?repo=${encodeURIComponent(localRepos[0].label)}`;
+          window.location.href = apiUrl(`/?repo=${encodeURIComponent(localRepos[0].label)}`);
         }
       } else {
         setError(data.error);

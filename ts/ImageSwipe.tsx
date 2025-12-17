@@ -3,6 +3,7 @@ import React from 'react';
 import {ImageDiffProps} from './ImageDiff';
 import {ImageMetadata} from './ImageMetadata';
 import {makePerceptualBoxDiv} from './image_utils';
+import {apiUrl} from './api-utils';
 
 export interface ImageSwipeProps extends ImageDiffProps {
   mode?: 'swipe' | 'onion-skin';
@@ -42,8 +43,8 @@ export function ImageSwipe(props: ImageSwipeProps) {
     containerWidth = Math.max(imA.width, imB.width);
   }
   const diffBoxDiv = makePerceptualBoxDiv(props.pdiffMode, pair, scaleDown);
-  const urlA = `/a/image/${pair.a}`;
-  const urlB = `/b/image/${pair.b}`;
+  const urlA = apiUrl(`/a/image/${pair.a}`);
+  const urlB = apiUrl(`/b/image/${pair.b}`);
   const styleA: React.CSSProperties & {backgroundSize: string; backgroundImage: string} = {
     backgroundImage: `url(${urlA})`,
     backgroundSize: `${imA.width}px ${imA.height}px`,
@@ -77,7 +78,7 @@ export function ImageSwipe(props: ImageSwipeProps) {
 
   // Add an opaque grid under each image to expose transparency.
   for (const o of [styleA, styleB]) {
-    o.backgroundImage += ', url(/static/img/trans_bg.gif)';
+    o.backgroundImage += `, url(${apiUrl('/static/img/trans_bg.gif')})`;
     if (_.has(o, 'backgroundSize')) {
       o.backgroundSize += ', auto auto';
     }

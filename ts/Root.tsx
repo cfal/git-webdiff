@@ -116,7 +116,7 @@ export function Root() {
   // Repo switching
   const switchRepo = React.useCallback((label: string) => {
     // Update URL with new repo label
-    window.location.href = `/?repo=${encodeURIComponent(label)}`;
+    window.location.href = apiUrl(`/?repo=${encodeURIComponent(label)}`);
   }, []);
 
   // Hot reload detection (per-repo)

@@ -273,6 +273,7 @@ def create_app(root_path: str = "") -> FastAPI:
                 }
 
                 html = html.replace('{{data}}', json.dumps(data, indent=2))
+                html = html.replace('{{ root_path }}', app.root_path)
 
             return HTMLResponse(content=html)
         except Exception as e:
