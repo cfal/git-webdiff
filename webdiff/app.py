@@ -534,6 +534,112 @@ def create_app(root_path: str = "") -> FastAPI:
             }
         )
 
+    @app.get("/api/commits/{repo_idx}")
+    async def get_commits(repo_idx: int, limit: int = 50, offset: int = 0):
+        """Get commit history for a specific repo.
+
+        Returns a list of commits with hash, message, author, and date.
+        """
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        repo = REPOS[repo_idx]
+        repo_path = repo['path']
+
+        try:
+            # Get current branch name
+            branch_cmd = ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+            branch_result = subprocess.run(
+                branch_cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+
+            # Git log format: hash|short_hash|subject|author|date
+            # Using %aI for ISO 8601 date format
+            cmd = [
+                'git', 'log',
+                f'--pretty=format:%H|%h|%s|%an|%aI',
+                f'-n{limit + 1}',  # Get one extra to check if there are more
+                f'--skip={offset}'
+            ]
+
+            result = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                return JSONResponse({
+                    'error': f'git log failed: {result.stderr}'
+                }, status_code=500)
+
+            commits = []
+            lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
+
+            # Check if there are more commits
+            has_more = len(lines) > limit
+            lines = lines[:limit]  # Only return requested amount
+
+            for line in lines:
+                if not line:
+                    continue
+                parts = line.split('|', 4)
+                if len(parts) >= 5:
+                    hash_full, short_hash, message, author, date_iso = parts
+                    # Calculate relative time
+                    try:
+                        from datetime import datetime, timezone
+                        commit_date = datetime.fromisoformat(date_iso.replace('Z', '+00:00'))
+                        now = datetime.now(timezone.utc)
+                        delta = now - commit_date
+
+                        if delta.days > 365:
+                            years = delta.days // 365
+                            relative = f"{years}y ago"
+                        elif delta.days > 30:
+                            months = delta.days // 30
+                            relative = f"{months}mo ago"
+                        elif delta.days > 0:
+                            relative = f"{delta.days}d ago"
+                        elif delta.seconds > 3600:
+                            hours = delta.seconds // 3600
+                            relative = f"{hours}h ago"
+                        elif delta.seconds > 60:
+                            mins = delta.seconds // 60
+                            relative = f"{mins}m ago"
+                        else:
+                            relative = "just now"
+                    except:
+                        relative = date_iso[:10]  # Fallback to date
+
+                    commits.append({
+                        'hash': hash_full,
+                        'short_hash': short_hash,
+                        'message': message,
+                        'author': author,
+                        'date': date_iso,
+                        'relative': relative
+                    })
+
+            return JSONResponse({
+                'commits': commits,
+                'has_more': has_more,
+                'branch': branch
+            })
+
+        except subprocess.TimeoutExpired:
+            return JSONResponse({'error': 'git log timed out'}, status_code=500)
+        except Exception as e:
+            logging.error(f"Error getting commits for repo {repo_idx}: {e}")
+            return JSONResponse({'error': str(e)}, status_code=500)
+
     @app.post("/api/server-reload/{repo_idx}")
     async def server_reload(repo_idx: int, request: Request):
         """Reload a specific repo.

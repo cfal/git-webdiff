@@ -12,6 +12,7 @@ import { apiUrl } from './api-utils';
 import { CommandBar } from './CommandBar';
 import { RepoSelector } from './RepoSelector';
 import { RepoManagementModal } from './RepoManagementModal';
+import { CommitHistory } from './CommitHistory';
 
 interface Repo {
   label: string;
@@ -210,6 +211,20 @@ export function Root() {
             {repoSelectorElement}
           </div>
         )}
+
+        {/* Commit history panel */}
+        <CommitHistory
+          repoIdx={currentRepoIdx}
+          onSelectCommit={(hash) => {
+            // View this specific commit's changes
+            reload([`${hash}^..${hash}`]);
+          }}
+          onSelectWorkingChanges={() => {
+            // Back to working directory changes (no args = default)
+            reload([]);
+          }}
+          reloadInProgress={reloadInProgress}
+        />
 
         <div
           style={{
