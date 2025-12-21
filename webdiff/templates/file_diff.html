@@ -3,14 +3,14 @@
 <head>
   <title>Diff</title>
 
-  <script src="./static/js/highlight.min.js"></script>
-  <link rel="stylesheet" href="./theme.css">
+  <script src="{{ root_path }}/static/js/highlight.min.js"></script>
+  <link rel="stylesheet" href="{{ root_path }}/theme.css">
 
-  <link rel="stylesheet" href="./static/codediff.js/codediff.css">
+  <link rel="stylesheet" href="{{ root_path }}/static/codediff.js/codediff.css">
 
-  <link href='./static/css/jetbrains-mono.css' rel='stylesheet'>
+  <link href='{{ root_path }}/static/css/jetbrains-mono.css' rel='stylesheet'>
 
-  <link rel="stylesheet" href="./static/css/style.css">
+  <link rel="stylesheet" href="{{ root_path }}/static/css/style.css">
 
 </head>
 
@@ -37,6 +37,6 @@ var SERVER_CONFIG = server_config;
 var ROOT_PATH = root_path;
 </script>
 
-<script src="./static/js/file_diff.js"></script>
+<script src="{{ root_path }}/static/js/file_diff.js?v={{ js_version }}"></script>
 
 </html>

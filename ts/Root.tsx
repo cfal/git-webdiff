@@ -12,6 +12,7 @@ import { apiUrl } from './api-utils';
 import { CommandBar } from './CommandBar';
 import { RepoSelector } from './RepoSelector';
 import { RepoManagementModal } from './RepoManagementModal';
+import { CommitHistory } from './CommitHistory';
 
 interface Repo {
   label: string;
@@ -116,7 +117,7 @@ export function Root() {
   // Repo switching
   const switchRepo = React.useCallback((label: string) => {
     // Update URL with new repo label
-    window.location.href = `/?repo=${encodeURIComponent(label)}`;
+    window.location.href = apiUrl(`/?repo=${encodeURIComponent(label)}`);
   }, []);
 
   // Hot reload detection (per-repo)
@@ -210,6 +211,21 @@ export function Root() {
             {repoSelectorElement}
           </div>
         )}
+
+        {/* Commit history panel */}
+        <CommitHistory
+          repoIdx={currentRepoIdx}
+          onSelectCommit={(hash) => {
+            // View this specific commit's changes
+            reload([`${hash}^..${hash}`]);
+          }}
+          onSelectWorkingChanges={() => {
+            // Back to working directory changes (no args = default)
+            reload([]);
+          }}
+          reloadInProgress={reloadInProgress}
+          currentGitArgs={git_args}
+        />
 
         <div
           style={{

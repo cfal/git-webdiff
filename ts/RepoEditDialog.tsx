@@ -1,4 +1,5 @@
 import React from 'react';
+import {apiUrl} from './api-utils';
 
 interface RepoEditDialogProps {
   mode: 'add' | 'edit';
@@ -59,7 +60,7 @@ export function RepoEditDialog({
     setValidationResult(null);
 
     try {
-      const response = await fetch('/api/repos/validate', {
+      const response = await fetch(apiUrl('/api/repos/validate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ label, path }),
