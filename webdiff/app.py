@@ -649,6 +649,170 @@ def create_app(root_path: str = "") -> FastAPI:
             logging.error(f"Error getting commits for repo {repo_idx}: {e}")
             return JSONResponse({'error': str(e)}, status_code=500)
 
+    @app.get("/api/files/{repo_idx}")
+    async def get_files(repo_idx: int):
+        """Get all files in repo with their status.
+
+        Returns tracked files (changed), untracked files, and gitignored files.
+        """
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        repo = REPOS[repo_idx]
+        repo_path = repo['path']
+        state = REPO_STATES[repo_idx]
+
+        try:
+            # Get changed files from current diff
+            changed_files = []
+            with state['diff_lock']:
+                for file_pair in state['diff']:
+                    # Determine status
+                    if file_pair.a is None:
+                        status = 'added'
+                    elif file_pair.b is None:
+                        status = 'deleted'
+                    else:
+                        status = 'modified'
+
+                    # Use the path from b (new) if available, otherwise from a (old)
+                    path = file_pair.b if file_pair.b else file_pair.a
+                    changed_files.append({
+                        'path': path,
+                        'status': status
+                    })
+
+            # Get untracked files using git status
+            untracked_files = []
+            try:
+                untracked_cmd = ['git', 'ls-files', '--others', '--exclude-standard']
+                untracked_result = subprocess.run(
+                    untracked_cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if untracked_result.returncode == 0:
+                    for line in untracked_result.stdout.strip().split('\n'):
+                        if line:
+                            untracked_files.append({'path': line})
+            except Exception as e:
+                logging.warning(f"Error getting untracked files: {e}")
+
+            # Get gitignored files
+            gitignored_files = []
+            try:
+                # Get ignored files (not directories)
+                ignored_cmd = ['git', 'ls-files', '--others', '--ignored', '--exclude-standard']
+                ignored_result = subprocess.run(
+                    ignored_cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if ignored_result.returncode == 0:
+                    # Group by top-level directory to avoid listing thousands of files
+                    dir_counts = {}
+                    individual_files = []
+
+                    for line in ignored_result.stdout.strip().split('\n'):
+                        if not line:
+                            continue
+
+                        # Check if it's in a directory
+                        if '/' in line:
+                            top_dir = line.split('/')[0] + '/'
+                            dir_counts[top_dir] = dir_counts.get(top_dir, 0) + 1
+                        else:
+                            individual_files.append({'path': line})
+
+                    # Add directories with file counts
+                    for dir_path, count in sorted(dir_counts.items()):
+                        gitignored_files.append({
+                            'path': dir_path,
+                            'is_dir': True,
+                            'file_count': count
+                        })
+
+                    # Add individual files
+                    gitignored_files.extend(individual_files)
+
+            except Exception as e:
+                logging.warning(f"Error getting gitignored files: {e}")
+
+            return JSONResponse({
+                'changed': changed_files,
+                'untracked': untracked_files,
+                'gitignored': gitignored_files
+            })
+
+        except Exception as e:
+            logging.error(f"Error getting files for repo {repo_idx}: {e}")
+            return JSONResponse({'error': str(e)}, status_code=500)
+
+    @app.get("/api/file-content/{repo_idx}")
+    async def get_file_content(repo_idx: int, path: str):
+        """Get content of a file (for viewing untracked/gitignored files).
+
+        Query params:
+            path: Relative path to file within repo
+        """
+        if repo_idx < 0 or repo_idx >= len(REPOS):
+            return JSONResponse({'error': f'Invalid repo index: {repo_idx}'}, status_code=404)
+
+        repo = REPOS[repo_idx]
+        repo_path = repo['path']
+
+        # Security: ensure path doesn't escape repo
+        abs_path = os.path.normpath(os.path.join(repo_path, path))
+        if not abs_path.startswith(os.path.normpath(repo_path)):
+            return JSONResponse({'error': 'Invalid path'}, status_code=400)
+
+        if not os.path.exists(abs_path):
+            return JSONResponse({'error': 'File not found'}, status_code=404)
+
+        if os.path.isdir(abs_path):
+            return JSONResponse({'error': 'Path is a directory'}, status_code=400)
+
+        try:
+            # Check if binary
+            if is_binary(abs_path):
+                file_size = os.path.getsize(abs_path)
+                return JSONResponse({
+                    'content': None,
+                    'is_binary': True,
+                    'size': file_size,
+                    'path': path
+                })
+
+            # Read file content (limit to 1MB)
+            file_size = os.path.getsize(abs_path)
+            if file_size > 1024 * 1024:
+                return JSONResponse({
+                    'content': None,
+                    'is_binary': False,
+                    'truncated': True,
+                    'size': file_size,
+                    'path': path,
+                    'error': 'File too large (>1MB)'
+                })
+
+            with open(abs_path, 'r', errors='replace') as f:
+                content = f.read()
+
+            return JSONResponse({
+                'content': content,
+                'is_binary': False,
+                'size': file_size,
+                'path': path
+            })
+
+        except Exception as e:
+            logging.error(f"Error reading file {path}: {e}")
+            return JSONResponse({'error': str(e)}, status_code=500)
+
     @app.post("/api/server-reload/{repo_idx}")
     async def server_reload(repo_idx: int, request: Request):
         """Reload a specific repo.

@@ -40,7 +40,7 @@ function FileView({
   };
   
   return (
-    <div className="file-diff-container" id={`file-${filePair.idx}`}>
+    <div className="file-diff-container" id={`file-${filePair.idx}`} data-file-path={filePairDisplayName(filePair)}>
       <div className="file-diff-header">
         <div onClick={onToggle} style={{display: 'flex', alignItems: 'center', flex: 1, gap: '8px'}}>
           <span className={`diff ${filePair.type}`} title={filePair.type} />

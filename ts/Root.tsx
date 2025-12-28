@@ -13,6 +13,7 @@ import { CommandBar } from './CommandBar';
 import { RepoSelector } from './RepoSelector';
 import { RepoManagementModal } from './RepoManagementModal';
 import { CommitHistory } from './CommitHistory';
+import { FileBrowser } from './FileBrowser';
 
 interface Repo {
   label: string;
@@ -225,6 +226,22 @@ export function Root() {
           }}
           reloadInProgress={reloadInProgress}
           currentGitArgs={git_args}
+        />
+
+        {/* File browser panel */}
+        <FileBrowser
+          repoIdx={currentRepoIdx}
+          repoLabel={currentRepoLabel}
+          onScrollToFile={(path) => {
+            // Find the file diff element and scroll to it
+            const fileElements = document.querySelectorAll('[data-file-path]');
+            for (const el of fileElements) {
+              if (el.getAttribute('data-file-path') === path) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                break;
+              }
+            }
+          }}
         />
 
         <div
