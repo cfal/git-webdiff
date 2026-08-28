@@ -68,7 +68,6 @@ export function NoChanges(props: {filePair: FilePair; isEqualAfterNormalization:
   return msg ? <div className="no-changes">{msg}</div> : null;
 }
 
-
 export interface CodeDiffContainerProps {
   filePair: FilePair;
   diffOptions: Partial<GitDiffOptions>;
@@ -86,12 +85,12 @@ export interface CodeDiffContainerProps {
 // A side-by-side diff of source code.
 export function CodeDiffContainer(props: CodeDiffContainerProps) {
   const {filePair, normalizeJSON, preloadedData} = props;
-  
+
   // Use the preloaded data directly - it's always available from DiffView
   const contents = {
     before: preloadedData.content_a,
     after: preloadedData.content_b,
-    diffOps: preloadedData.diff_ops
+    diffOps: preloadedData.diff_ops,
   };
 
   const isEqualAfterNormalization = React.useMemo(() => {
@@ -143,7 +142,12 @@ function FileDiff(props: FileDiffProps) {
   // build the diff view and add it to the current DOM
 
   const lastOp = diffOps[diffOps.length - 1];
-  const numLines = Math.max(lastOp.before[1], lastOp.after[1]);
+  // Empty operations are valid for identical files and can also be returned
+  // alongside a backend diff error. Keep the view alive instead of crashing
+  // the entire React tree while attempting to inspect the last operation.
+  const numLines = lastOp
+    ? Math.max(lastOp.before[1], lastOp.after[1])
+    : Math.max(contentsBefore?.split('\n').length ?? 0, contentsAfter?.split('\n').length ?? 0);
 
   // First guess a language based on the file name.
   // Fall back to guessing based on the contents of the longer version.
@@ -175,12 +179,7 @@ function FileDiff(props: FileDiffProps) {
   return (
     <div className="diff">
       <NoChanges filePair={filePair} isEqualAfterNormalization={isEqualAfterNormalization} />
-      <CodeDiff
-        beforeText={contentsBefore}
-        afterText={contentsAfter}
-        ops={diffOps}
-        params={opts}
-      />
+      <CodeDiff beforeText={contentsBefore} afterText={contentsAfter} ops={diffOps} params={opts} />
     </div>
   );
 }

@@ -33,7 +33,7 @@ export function DiffView(props: Props) {
           thinFilePair.idx,
           gitDiffOptionsToFlags(diffOptions),
           normalizeJSON,
-          noTruncate
+          noTruncate,
         );
         setUnifiedData(data);
       } catch (e) {
@@ -46,8 +46,15 @@ export function DiffView(props: Props) {
     return <div>Loading…</div>;
   }
 
+  // Clicking "Render diff anyway" updates noTruncate before the request for
+  // the full file completes. Do not try to render the previous truncated
+  // response: it intentionally contains no content or diff operations.
+  if (unifiedData.truncated && noTruncate) {
+    return <div>Loading full diff…</div>;
+  }
+
   // Check if file was truncated
-  if (unifiedData.truncated && !noTruncate) {
+  if (unifiedData.truncated) {
     const bytesInMB = (unifiedData.truncated_bytes || 0) / (1024 * 1024);
     return (
       <div className="diff">
@@ -57,8 +64,8 @@ export function DiffView(props: Props) {
               <td className="code equal before suppressed-large-diff">
                 <p>⚠️ This file may be minified and the diff may slow down the browser. ⚠️</p>
                 <p>
-                  {unifiedData.truncated_lines} lines exceed 500 characters
-                  ({bytesInMB.toFixed(2)} MB would be hidden)
+                  {unifiedData.truncated_lines} lines exceed 500 characters ({bytesInMB.toFixed(2)}{' '}
+                  MB would be hidden)
                 </p>
                 <p>
                   <a
@@ -81,7 +88,7 @@ export function DiffView(props: Props) {
   // Use the thick data from unified response
   const filePair = {
     ...unifiedData.thick,
-    idx: thinFilePair.idx
+    idx: thinFilePair.idx,
   };
 
   let diffEl;
@@ -100,7 +107,7 @@ export function DiffView(props: Props) {
           diff_ops: unifiedData.diff_ops,
           truncated: unifiedData.truncated,
           truncated_lines: unifiedData.truncated_lines,
-          truncated_bytes: unifiedData.truncated_bytes
+          truncated_bytes: unifiedData.truncated_bytes,
         }}
       />
     );
